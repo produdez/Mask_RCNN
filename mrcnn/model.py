@@ -35,6 +35,11 @@ tf.compat.v1.disable_eager_execution()
 ############################################################
 
 
+class ModdedLayer(KL.Layer):
+    def get_config(self):
+        cfg = super().get_config()
+        return cfg    
+
 def log(text, array=None):
     """Prints a text message. And, optionally, if a Numpy array is provided it
     prints it's shape, min, and max values.
@@ -252,7 +257,7 @@ def clip_boxes_graph(boxes, window):
     return clipped
 
 
-class ProposalLayer(KL.Layer):
+class ProposalLayer(ModdedLayer):
     """Receives anchor scores and selects a subset to pass as proposals
     to the second stage. Filtering is done based on anchor scores and
     non-max suppression to remove overlaps. It also applies bounding
@@ -353,7 +358,7 @@ def log2_graph(x):
     return tf.math.log(x) / tf.math.log(2.0)
 
 
-class PyramidROIAlign(KL.Layer):
+class PyramidROIAlign(ModdedLayer):
     """Implements ROI Pooling on multiple levels of the feature pyramid.
 
     Params:
@@ -582,7 +587,7 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
     roi_gt_box_assignment = tf.cond(
         pred=tf.greater(tf.shape(input=positive_overlaps)[1], 0),
         true_fn=lambda: tf.argmax(input=positive_overlaps, axis=1),
-        false_fn=lambda: tf.cast(tf.constant([]), tf.int64)
+        false_fn=lambda: tf.cast(K.constant([]), tf.int64)
     )
     roi_gt_boxes = tf.gather(gt_boxes, roi_gt_box_assignment)
     roi_gt_class_ids = tf.gather(gt_class_ids, roi_gt_box_assignment)
@@ -636,7 +641,7 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
     return rois, roi_gt_class_ids, deltas, masks
 
 
-class DetectionTargetLayer(KL.Layer):
+class DetectionTargetLayer(ModdedLayer):
     """Subsamples proposals and generates target box refinement, class_ids,
     and masks for each.
 
@@ -801,7 +806,7 @@ def refine_detections_graph(rois, probs, deltas, window, config):
     return detections
 
 
-class DetectionLayer(KL.Layer):
+class DetectionLayer(ModdedLayer):
     """Takes classified proposal boxes and their bounding box deltas and
     returns the final detection boxes.
 
@@ -1070,7 +1075,7 @@ def rpn_class_loss_graph(rpn_match, rpn_class_logits):
     loss = K.sparse_categorical_crossentropy(target=anchor_class,
                                              output=rpn_class_logits,
                                              from_logits=True)
-    loss = K.switch(tf.size(input=loss) > 0, K.mean(loss), tf.constant(0.0))
+    loss = K.switch(tf.size(input=loss) > 0, K.mean(loss), K.constant(0.0))
     return loss
 
 
@@ -1099,7 +1104,7 @@ def rpn_bbox_loss_graph(config, target_bbox, rpn_match, rpn_bbox):
 
     loss = smooth_l1_loss(target_bbox, rpn_bbox)
 
-    loss = K.switch(tf.size(input=loss) > 0, K.mean(loss), tf.constant(0.0))
+    loss = K.switch(tf.size(input=loss) > 0, K.mean(loss), K.constant(0.0))
     return loss
 
 
@@ -1165,7 +1170,7 @@ def mrcnn_bbox_loss_graph(target_bbox, target_class_ids, pred_bbox):
     # Smooth-L1 Loss
     loss = K.switch(tf.size(input=target_bbox) > 0,
                     smooth_l1_loss(y_true=target_bbox, y_pred=pred_bbox),
-                    tf.constant(0.0))
+                    K.constant(0.0))
     loss = K.mean(loss)
     return loss
 
@@ -1204,7 +1209,7 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
     # shape: [batch, roi, num_classes]
     loss = K.switch(tf.size(input=y_true) > 0,
                     K.binary_crossentropy(target=y_true, output=y_pred),
-                    tf.constant(0.0))
+                    K.constant(0.0))
     loss = K.mean(loss)
     return loss
 
@@ -1850,7 +1855,7 @@ class MaskRCNN(object):
 
         # Inputs
         input_image = KL.Input(
-            shape=[None, None, config.IMAGE_SHAPE[2]], name="input_image")
+            shape=[None, None, config.IMAGE_SHAPE[2]], name="fuck-this-shit")
         input_image_meta = KL.Input(shape=[config.IMAGE_META_SIZE],
                                     name="input_image_meta")
         if mode == "training":
@@ -1869,8 +1874,12 @@ class MaskRCNN(object):
             input_gt_boxes = KL.Input(
                 shape=[None, 4], name="input_gt_boxes", dtype=tf.float32)
             # Normalize coordinates
-            gt_boxes = KL.Lambda(lambda x: norm_boxes_graph(
-                x, K.shape(input_image)[1:3]))(input_gt_boxes)
+            # gt_boxes = KL.Lambda(lambda x: norm_boxes_graph(
+            #     x, K.shape(input_image)[1:3]))(input_gt_boxes)
+            gt_boxes = KL.Lambda(
+                lambda x: norm_boxes_graph(x[0], K.shape(x[1])[1:3]), 
+                name='fucking-lambda', 
+            )((input_gt_boxes, input_image))
             # 3. GT Masks (zero padded)
             # [batch, height, width, MAX_GT_INSTANCES]
             if config.USE_MINI_MASK:
@@ -1929,10 +1938,10 @@ class MaskRCNN(object):
             anchors = np.broadcast_to(anchors, (config.BATCH_SIZE,) + anchors.shape)
             # A hack to get around Keras's bad support for constants
             # This class returns a constant layer
-            class ConstLayer(tf.keras.layers.Layer):
+            class ConstLayer(ModdedLayer):
                 def __init__(self, x, name=None):
                     super(ConstLayer, self).__init__(name=name)
-                    self.x = tf.Variable(x)
+                    self.x = K.variable(x)
 
                 def call(self, input):
                     return self.x
@@ -2839,8 +2848,8 @@ def norm_boxes_graph(boxes, shape):
         [..., (y1, x1, y2, x2)] in normalized coordinates
     """
     h, w = tf.split(tf.cast(shape, tf.float32), 2)
-    scale = tf.concat([h, w, h, w], axis=-1) - tf.constant(1.0)
-    shift = tf.constant([0., 0., 1., 1.])
+    scale = tf.concat([h, w, h, w], axis=-1) - K.constant(1.0)
+    shift = K.constant([0., 0., 1., 1.])
     return tf.divide(boxes - shift, scale)
 
 
@@ -2856,6 +2865,6 @@ def denorm_boxes_graph(boxes, shape):
         [..., (y1, x1, y2, x2)] in pixel coordinates
     """
     h, w = tf.split(tf.cast(shape, tf.float32), 2)
-    scale = tf.concat([h, w, h, w], axis=-1) - tf.constant(1.0)
-    shift = tf.constant([0., 0., 1., 1.])
+    scale = tf.concat([h, w, h, w], axis=-1) - K.constant(1.0)
+    shift = K.constant([0., 0., 1., 1.])
     return tf.cast(tf.round(tf.multiply(boxes, scale) + shift), tf.int32)
